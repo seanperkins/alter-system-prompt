@@ -1,69 +1,132 @@
 # alter-system-prompt
 
-A Claude Code mod that rewrites parts of Claude Code's built-in instructions when they clash with your own rules.
+A Claude Code mod that lets you rewrite the instructions Claude Code gives the model. You write find-and-replace rules in a JSON file, and the mod applies them to the system prompt, tool descriptions, and the messages Claude Code adds during a session. It can also block tool calls that match a pattern.
 
 ## Why this exists
 
-Claude Code sends the model a system prompt you can't edit. Your own instructions (`CLAUDE.md`, memory, hooks) are added alongside it, but they can't remove anything. When a built-in line and your rule disagree, the model gets two instructions that contradict each other, and the built-in one often wins.
+Claude Code's built-in instructions aren't editable. `CLAUDE.md`, hooks and `--append-system-prompt` can add instructions, but they can't remove one. When a built-in instruction disagrees with your own rule, the model gets two contradictory instructions, and the built-in one often wins.
 
-The case that started this: Claude Code tells the model to keep temporary files in a per-session "scratchpad" folder, for example:
+The case that started this: Claude Code tells the model to keep temporary files in a per-session "scratchpad" folder under `/private/tmp/claude-<uid>/…`. We keep scratch output in each project's own `.tmp/` folder, where it's gitignored and easy to find. That rule was in `CLAUDE.md` and in saved memory, and Claude still kept saving screenshots and logs to the scratchpad. No Claude Code setting changes it.
 
+A mod can. Claude Code's mod API lets a plugin see that text as it's assembled and change it before it's sent. This mod turns that into a rules file anyone can edit, so you replace the instruction instead of arguing with it.
+
+## Quick start
+
+1. Install:
+   ```
+   /plugin marketplace add seanperkins/alter-system-prompt
+   /plugin install alter-system-prompt@alter-system-prompt
+   ```
+2. In a new session, run `/alter-prompt presets` to list the ready-made rules, then add one, for example `/alter-prompt add project-tmp`.
+3. Send any message, then run `/alter-prompt` to see which rules matched.
+
+To write your own rule, run `/prompt-dump`, find the sentence you want to change, and add a rule for it (format below).
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `/alter-prompt` | Lists your rule files and rules, and how often each one matched this session |
+| `/alter-prompt presets` | Lists the ready-made rules |
+| `/alter-prompt add <preset>` | Copies a preset into your rules file, keeping your other rules |
+| `/alter-prompt init` | Creates an empty rules file |
+| `/alter-prompt reload` | Re-reads the rule files after you edit them |
+| `/prompt-dump` | Saves what the model was last sent to `<project>/.tmp/prompt-dump-<time>/`: the system prompt before and after your rules, the context blocks, and injected messages (rewritten ones are marked) |
+
+## Rule files
+
+Rules are read from two files and merged:
+
+- `~/.claude/alter-system-prompt.json`: your rules, for every project
+- `<project>/.claude/alter-system-prompt.json`: rules for one project
+
+When both files have a rule with the same `id`, the project's version wins. If a file has a mistake, the mod shows a notice, skips the broken rule, and keeps the rest.
+
+```json
+{
+  "rules": [
+    {
+      "id": "british-english",
+      "description": "Answer in British English",
+      "addSection": "Write in British English spelling."
+    },
+    {
+      "id": "shorter-tmp-advice",
+      "find": "always use it for temporary files",
+      "replace": "use {projectRoot}/.tmp for temporary files"
+    }
+  ],
+  "block": [
+    {
+      "id": "no-force-push",
+      "tools": ["Bash"],
+      "pattern": "git push .*(--force|-f)\\b",
+      "message": "force-pushing is off in this setup."
+    }
+  ]
+}
 ```
-/private/tmp/claude-501/<project>/<session-id>/scratchpad
-```
 
-We keep scratch output in the project's own `.tmp/<task>/` folder instead. It's gitignored, it sits next to the code it belongs to, and you can find it later. That rule was in `CLAUDE.md` and in saved memory, and Claude still kept saving screenshots and logs to the scratchpad, then pointing us at files buried in `/private/tmp`.
+### A rule
 
-There's no setting for this. Claude Code has no option to turn the scratchpad off or point it at a project folder. `CLAUDE_CODE_TMPDIR` moves the whole temp directory to one path for the machine, not per project. Hooks, `CLAUDE.md` and `--append-system-prompt` can only add text, not take the built-in line away.
+Every rule has an `id` and exactly one action.
 
-A mod can. Claude Code's mod API lets a plugin see the system prompt as it's built and change it before it's sent, so this mod replaces the instruction instead of arguing with it.
+| Action | What it does |
+|---|---|
+| `"replace": "…"` | Replaces what `find` or `findRegex` matches. Use `""` to delete. |
+| `"append": "…"` / `"prepend": "…"` | Adds text to the end or start of each piece the rule applies to. With `find`, only pieces containing that text. |
+| `"addSection": "…"` | Adds a new section at the end of the system prompt. |
+| `"dropSection": "<id>"` | Removes a system prompt section by its id. `/prompt-dump` shows the ids. |
 
-## What it does
+Optional fields:
 
-1. **Rewrites the scratchpad instruction.** The line telling the model to use the session scratchpad becomes "put scratch files in `<project>/.tmp/<unique-task-dir>/`". The sandbox's "use `$TMPDIR` for temporary files" line gets the same change. The rewrite covers the system prompt, tool descriptions and the notices Claude Code injects partway through a session.
-2. **Blocks writes into the scratchpad.** A `Write`, `Edit`, `NotebookEdit` or `Bash` call that touches the session scratchpad is refused, with a message pointing to the project's `.tmp/`. A slip fails immediately instead of producing files nobody can find.
-3. **Adds `/prompt-dump`.** It saves what the model was last sent to `<project>/.tmp/prompt-dump-<time>/`:
-   - `system-before.md`: the system prompt as Claude Code built it
-   - `system-after.md`: the same prompt after this mod's changes
-   - `context.md`: the context blocks, such as `CLAUDE.md` and the date
-   - `attachments.md`: messages Claude Code injected, with rewritten ones marked
-   - `sections.tsv`: every piece with its size
+- `find` (literal text) or `findRegex` (a JavaScript regular expression), plus `flags`, for example `"g"` to replace every match or `"m"` so `^` and `$` match at each line.
+- `in`: where to look: `"system"`, `"tools"`, `"attachments"`, or a list. Leave it out to look everywhere. Use leaving it out for wording that Claude Code might move around.
+- `section`, `tool`, `attachment`: limit the rule to one system prompt section, one tool's description (such as `"Artifact"`), or one kind of injected message (such as `"environment"`). `/prompt-dump` shows the names.
+- `enabled: false`: switches a rule off without deleting it.
+- `description`: shown by `/alter-prompt`.
 
-   Use it to check the rewrite worked, and to find the next built-in instruction worth changing.
+In rule text, `{projectRoot}` and `{home}` are filled in, and with `findRegex`, `$1` to `$9` insert the matched groups.
 
-4. **Adds a mockup rule to the Artifact tool.** The Artifact tool's built-in text says to publish finished work as a web page without being asked. The mod appends one rule to it: an HTML mockup is written as local files (`index.html` plus `styles.css`) and its path given, and only published when you ask. Nothing in the tool's text is removed.
+### A block
+
+`block` entries refuse tool calls. `pattern` is a regular expression tested against the call's command (Bash) or file path (Write, Edit, NotebookEdit and others). `tools` limits it to some tools. `message` is shown to the model, with `{projectRoot}` filled in.
+
+## Presets
+
+| Preset | What it does |
+|---|---|
+| `project-tmp` | Rewrites the session-scratchpad and sandbox `$TMPDIR` instructions to point at `<project>/.tmp/<task>/`, and blocks writes into the scratchpad. |
+| `artifact-mockups` | Adds a rule to the Artifact tool: write HTML mockups as local `index.html` + `styles.css` files, and only publish one when asked. |
+
+Presets live in `hooks/presets.ts`. To suggest a new one, add it there with a test.
+
+## What it won't change
+
+Some text is protected, so a rule can't weaken safety or policy instructions by accident:
+
+- **Protected sections** (`action_caution`, `user_privacy`, `heron_brook`, `endconv_deferred_hint`) can be added to but not rewritten or dropped.
+- **Protected phrases**, such as the security-testing policy line and "Claude never publishes…" in the Artifact tool, can't be removed from any text. A rule that would remove one is skipped for that text, and `/alter-prompt` reports it as blocked.
+- **File contents** shown to the model, such as a file it read or edited, are never rewritten, so the model always sees what's really on disk.
+
+This guards against accidents. It isn't a security boundary.
 
 ## Terms of service
 
-This mod only changes text for your own Claude Code sessions, using Claude Code's own mod hooks. It doesn't modify the Claude Code program, take anything apart, or route around a limit. What the mod changes is limited on purpose:
+The mod only changes text in your own Claude Code sessions, using Claude Code's own mod hooks. It doesn't modify the Claude Code program, take anything apart, or get around a usage limit.
 
-- **Changing the system prompt is a supported thing to do.** Claude Code has official flags for it. `--system-prompt` replaces the whole prompt, and `--append-system-prompt` adds to it ([CLI reference](https://code.claude.com/docs/en/cli-reference)). Output styles and `CLAUDE.md` change it too.
-- **It never touches safety, security or policy text.** The rewrites match exactly two sentences about temporary files, and the Artifact change only adds a sentence. Anthropic's [Usage Policy](https://www.anthropic.com/legal/aup) forbids bypassing "capabilities, restrictions, or guardrails established within our products", so don't add a rewrite that removes or weakens one.
-- **It doesn't modify the Claude Code program.** It's a plugin loaded through Claude Code's mod support. The [legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance) requires the program to run "as published by Anthropic" when a business offers Claude Code to others. That rule covers the program, not prompt changes, but if you ship this inside a product for other people, check with Anthropic first.
+- **Changing the system prompt is supported.** Claude Code has official flags for it: `--system-prompt` replaces the whole prompt and `--append-system-prompt` adds to it ([CLI reference](https://code.claude.com/docs/en/cli-reference)). Output styles and `CLAUDE.md` change it too.
+- **Don't use it to remove safeguards.** Anthropic's [Usage Policy](https://www.anthropic.com/legal/aup) forbids bypassing "capabilities, restrictions, or guardrails established within our products". The protections above make that hard to do by accident. Don't write rules that try anyway.
+- **The Claude Code program itself is unchanged.** The [legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance) requires Claude Code to run "as published by Anthropic" when a business offers it to others. If you ship this inside a product for other people, check with Anthropic first.
 - **One gap:** the hook events this mod uses (`prompt.compose`, `tool.describe`, `prompt.attachment`) come with Claude Code's mod API and its type definitions. They aren't covered in the public hooks documentation yet.
 
 This isn't legal advice. Anthropic's [Consumer Terms](https://www.anthropic.com/legal/consumer-terms) and [Commercial Terms](https://www.anthropic.com/legal/commercial-terms) are the source to check.
 
-## Install
-
-```
-/plugin marketplace add seanperkins/alter-system-prompt
-/plugin install alter-system-prompt@alter-system-prompt
-```
-
-Restart Claude Code, or start a new session, so the rewritten prompt is used from the first message. The write block takes effect as soon as the mod loads.
-
-Make sure `.tmp/` is gitignored in your projects, or globally with `echo '.tmp/' >> ~/.config/git/ignore`.
-
 ## Limits
 
-- **It matches Claude Code's wording.** The rewrites look for specific sentences. If a Claude Code update rewords them, the rewrite stops matching and the original text goes through unchanged. The write block keeps working, and `/prompt-dump` shows whether the rewrite still lands.
-- **Only commands that name the scratchpad are blocked.** The `Bash` block catches commands that contain the scratchpad path. A program that writes to `$TMPDIR` on its own isn't affected.
-- **The sandbox temp folder itself doesn't change.** Sandboxed commands still get a system `$TMPDIR`. Some tools need it, for example for Unix sockets, which have a short path limit.
-
-## Adding a rewrite
-
-Rewrites are a list of `{ find, replace }` pairs in `hooks/register.ts`. Run `/prompt-dump`, find the sentence you want changed in `system-before.md` or `attachments.md`, and add a pattern for it. Keep each pattern narrow so it only matches the sentence you mean.
+- **Rules match Claude Code's wording.** If an update rewords a sentence, the rule stops matching and the original goes through unchanged. `/alter-prompt` shows rules that haven't matched, which is the sign to check `/prompt-dump`.
+- **When changes take effect.** System prompt and injected-message rules apply from your next message. Claude Code holds on to tool descriptions and context blocks, so changes there apply in a new session or after `/clear`.
+- **Blocks only see what the call names.** A block matches the command or path in the call. A program that writes somewhere on its own isn't caught.
 
 ## Development
 

@@ -1,7 +1,7 @@
 {
   "name": "alter-system-prompt",
-  "version": "0.1.0",
-  "description": "Mod: rewrite parts of Claude Code's built-in instructions that clash with your own rules. First rule: scratch files go in <project>/.tmp/, not the session scratchpad. Includes /prompt-dump.",
+  "version": "0.2.0",
+  "description": "Mod: rewrite Claude Code's built-in instructions with your own find/replace rules in a JSON file, block tool calls by pattern, and /prompt-dump what the model is sent. Safety text is protected.",
   "author": {
     "name": "Sean Perkins",
     "email": "sean@mobility-labs.com"
