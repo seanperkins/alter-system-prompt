@@ -219,6 +219,17 @@ const injectedLog = atom({ plugin: 'alter-system-prompt', key: 'injected' } as c
 })
 const hits = atom({ plugin: 'alter-system-prompt', key: 'hits' } as const, [] as Hit[], { shape: 'hits-1' })
 
+// Bookkeeping (captures for /prompt-dump, match counts) is best effort: when
+// several messages arrive at once their writes can collide, and that must
+// never stop a rewrite from going out.
+async function quietly(work: Promise<unknown>): Promise<void> {
+  try {
+    await work
+  } catch {
+    // dropped: a lost count or capture is harmless
+  }
+}
+
 const STARTER = '{\n  "rules": [],\n  "block": []\n}\n'
 
 // ---------------------------------------------------------------- hooks ---
@@ -267,7 +278,7 @@ async function load($: EngineInterface): Promise<Loaded> {
 async function record($: EngineInterface, changed: string[], blocked: string[], where: string) {
   if (!changed.length && !blocked.length) return
   const at = new Date().toISOString()
-  await update($, hits, list => {
+  await quietly(update($, hits, list => {
     const next = [...(list ?? [])]
     const add = (id: string, kind: Hit['kind']) => {
       const i = next.findIndex(h => h.id === id && h.kind === kind)
@@ -278,7 +289,7 @@ async function record($: EngineInterface, changed: string[], blocked: string[], 
     for (const id of changed) add(id, 'changed')
     for (const id of blocked) add(id, 'blocked')
     return next
-  })
+  }))
 }
 
 export const register: Register = on => {
@@ -321,15 +332,15 @@ export const register: Register = on => {
         return { id: `alter-system-prompt:${r.id}`, text: fill(r.addSection!, v), scope: 'session' as const }
       })
     const result = [...sections, ...added]
-    await update($, systemBefore, () => [...composed.sections])
-    await update($, systemAfter, () => result)
+    await quietly(update($, systemBefore, () => [...composed.sections]))
+    await quietly(update($, systemAfter, () => result))
     await record($, changed, blocked, 'system')
     return { ...composed, sections: result }
   })
 
   on('prompt.context', async ($, e, next) => {
     const result = await next(e)
-    await update($, context, () => [...result.blocks])
+    await quietly(update($, context, () => [...result.blocks]))
     return result
   })
 
@@ -347,7 +358,7 @@ export const register: Register = on => {
     const { rules } = await load($)
     const r = applyRules(injected.text, { where: 'attachments', attachment: e.type }, rules, await vars($))
     const row: Injected = { type: e.type, origin: e.origin?.kind ?? '?', before: injected.text, after: r.text }
-    await update($, injectedLog, list => [...(list ?? []), row].slice(-60))
+    await quietly(update($, injectedLog, list => [...(list ?? []), row].slice(-60)))
     await record($, r.changed, r.blocked, `attachment ${e.type}`)
     return r.text === injected.text ? injected : { ...injected, text: r.text }
   })

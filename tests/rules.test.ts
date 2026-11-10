@@ -7,7 +7,7 @@ const HOME = '/Users/me'
 const ROOT = '/Users/me/sites/demo'
 const GLOBAL = `${HOME}/.claude/alter-system-prompt.json`
 const PROJECT = `${ROOT}/.claude/alter-system-prompt.json`
-const SCRATCH = '/private/tmp/claude-501/-Users-me-sites-demo/23624592-9be9-4ab0-ab9f-1cd207455600/scratchpad'
+const SCRATCH = '/private/tmp/claude-501/-Users-me-sites-demo/00000000-1111-2222-3333-444444444444/scratchpad'
 
 const COMPOSE = {
   model: 'claude-opus-5-5',
@@ -216,4 +216,14 @@ test('a block pattern with the g flag matches every call, not every other one', 
     const ran = await $.tool.call({ tool: 'Bash', command: 'rm -rf build' })
     expect(ran.deny).toContain('no-rm')
   }
+})
+
+test('a rewrite still goes out when its bookkeeping write fails', async ($, on) => {
+  engine(on, { [GLOBAL]: { rules: [{ id: 'r1', find: 'scratchpad', replace: 'project .tmp' }] } })
+  on('state.set', () => {
+    throw new Error('write collided')
+  })
+  on('prompt.attachment', () => ({ text: 'use the scratchpad' }))
+  const { text } = await $.prompt.attachment({ type: 'environment', text: '', origin: { kind: 'engine' } } as never)
+  expect(text).toBe('use the project .tmp')
 })
