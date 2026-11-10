@@ -1,0 +1,14 @@
+{
+  "name": "alter-system-prompt",
+  "description": "A Claude Code mod that rewrites built-in instructions which clash with your own rules.",
+  "owner": { "name": "Sean Perkins", "email": "sean@mobility-labs.com" },
+  "plugins": [
+    {
+      "name": "alter-system-prompt",
+      "description": "Send scratch files to <project>/.tmp/ instead of the session scratchpad, block writes into the scratchpad, and /prompt-dump the prompt.",
+      "version": "0.1.0",
+      "source": "./",
+      "author": { "name": "Sean Perkins", "email": "sean@mobility-labs.com" }
+    }
+  ]
+}

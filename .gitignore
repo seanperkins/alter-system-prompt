@@ -1,0 +1,5 @@
+# Written by Claude Code when it loads the mod; regenerated per build.
+.claude-plugin/types/
+.tmp/
+node_modules/
+.DS_Store
