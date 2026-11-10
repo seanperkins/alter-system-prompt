@@ -1,4 +1,7 @@
+import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
+
+import type { ContextBlock, Injected, Section } from '../types'
 
 // Claude Code's system prompt tells the model to keep temporary files in a
 // per-session scratchpad under /private/tmp/claude-<uid>/.../scratchpad. We
@@ -37,13 +40,13 @@ const deny = (root: string, path: string): { deny: string } => ({
   deny: `alter-system-prompt: ${path} is in the session scratchpad. Put scratch files in ${root}/.tmp/<unique-task-dir>/ instead.`,
 })
 
-type Section = { id: string; text: string; scope: string }
-// What /prompt-dump writes out, captured from the engine's real renders (not
-// a replay, which would lack the tools and traits of a real request).
-let lastOriginal: readonly Section[] = []
-let lastRewritten: readonly Section[] = []
-let contextBlocks: readonly { name: string; text: string }[] = []
-const attachments: { type: string; origin: string; before: string; after: string }[] = []
+// What /prompt-dump writes out, captured from the engine's real renders (a
+// replay would lack the tools and traits of a real request). Kept in session
+// state, not module variables, so a reload of the mod doesn't lose them.
+const systemBefore = atom({ plugin: 'alter-system-prompt', key: 'systemBefore' } as const, [] as Section[], { shape: 'sections-1' })
+const systemAfter = atom({ plugin: 'alter-system-prompt', key: 'systemAfter' } as const, [] as Section[], { shape: 'sections-1' })
+const context = atom({ plugin: 'alter-system-prompt', key: 'context' } as const, [] as ContextBlock[], { shape: 'blocks-1' })
+const injectedLog = atom({ plugin: 'alter-system-prompt', key: 'injected' } as const, [] as Injected[], { shape: 'injected-1' })
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -61,14 +64,14 @@ export const register: Register = on => {
       const text = rewrite(s.text, root)
       return text === s.text ? s : { ...s, text }
     })
-    lastOriginal = composed.sections
-    lastRewritten = sections
+    await update($, systemBefore, () => [...composed.sections])
+    await update($, systemAfter, () => sections)
     return { ...composed, sections }
   })
 
   on('prompt.context', async ($, e, next) => {
     const result = await next(e)
-    contextBlocks = result.blocks
+    await update($, context, () => [...result.blocks])
     return result
   })
 
@@ -86,8 +89,8 @@ export const register: Register = on => {
     const injected = await next(e)
     if (injected.text === null) return injected
     const text = rewrite(injected.text, await $.session.root())
-    attachments.push({ type: e.type, origin: e.origin?.kind ?? '?', before: injected.text, after: text })
-    if (attachments.length > 60) attachments.shift()
+    const row = { type: e.type, origin: e.origin?.kind ?? '?', before: injected.text, after: text }
+    await update($, injectedLog, list => [...(list ?? []), row].slice(-60))
     return text === injected.text ? injected : { ...injected, text }
   })
 
@@ -116,6 +119,10 @@ export const register: Register = on => {
     const root = await $.session.root()
     const stamp = new Date().toISOString().replace(/[:.]/g, '-')
     const dir = `${root}/.tmp/prompt-dump-${stamp}`
+    const lastOriginal = (await read($, systemBefore)) ?? []
+    const lastRewritten = (await read($, systemAfter)) ?? []
+    const contextBlocks = (await read($, context)) ?? []
+    const attachments = (await read($, injectedLog)) ?? []
     const render = (sections: readonly Section[]) =>
       sections
         .map(s => `<!-- section: ${s.id} | ${s.scope} | ${s.text.length} chars -->\n\n${s.text}`)
