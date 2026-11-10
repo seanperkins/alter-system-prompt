@@ -63,19 +63,6 @@ const ACTIONS = ['replace', 'append', 'prepend', 'addSection', 'dropSection'] as
 // Messages that carry a file's contents, not instructions: never rewritten.
 const FILE_ATTACHMENTS = new Set(['file', 'edited_text_file', 'compact_file_reference', 'pdf_reference'])
 
-// Safety and policy text a rule may not remove. A rule whose result drops
-// one of these is undone for that piece of text and reported as blocked.
-// This is a guard against accidents, not a security boundary.
-const PROTECTED_SECTIONS = new Set(['action_caution', 'user_privacy', 'heron_brook', 'endconv_deferred_hint'])
-const PROTECTED_PHRASES = [
-  'IMPORTANT: Assist with authorized security testing',
-  'Refuse requests for destructive techniques',
-  'Claude never publishes',
-  'Usage Policy',
-  'Do not suggest adding sensitive paths',
-  'never infer pronouns',
-]
-
 function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -102,10 +89,6 @@ export function compile(
     }
     if (raw.replace !== undefined && raw.find === undefined && raw.findRegex === undefined) {
       errors.push(`${source}: rule "${raw.id}" uses replace but has no find or findRegex`)
-      continue
-    }
-    if (raw.dropSection !== undefined && PROTECTED_SECTIONS.has(raw.dropSection)) {
-      errors.push(`${source}: rule "${raw.id}" may not drop the protected section "${raw.dropSection}"`)
       continue
     }
     let regex: RegExp | null = null
@@ -148,10 +131,6 @@ function fill(template: string, vars: Vars, groups: (string | undefined)[] = [])
     .replace(/\$(\d)/g, (_, n: string) => groups[Number(n)] ?? '')
 }
 
-function isProtectedLoss(before: string, after: string): boolean {
-  return PROTECTED_PHRASES.some(p => before.includes(p) && !after.includes(p))
-}
-
 function applies(rule: Rule, target: Target): boolean {
   if (!rule.where.has(target.where)) return false
   if (rule.section !== undefined && rule.section !== target.section) return false
@@ -160,16 +139,15 @@ function applies(rule: Rule, target: Target): boolean {
   return true
 }
 
-/** Applies the text rules to one piece of text: the new text, and which rules changed it or were stopped. */
+/** Applies the text rules to one piece of text: the new text, and which rules changed it. */
 function applyRules(
   text: string,
   target: Target,
   rules: Rule[],
   vars: Vars,
-): { text: string; changed: string[]; blocked: string[] } {
+): { text: string; changed: string[] } {
   let out = text
   const changed: string[] = []
-  const blocked: string[] = []
   for (const rule of rules) {
     if (!applies(rule, target)) continue
     let next = out
@@ -185,16 +163,10 @@ function applyRules(
       if (!out.includes(add)) next = rule.append !== undefined ? `${out}\n\n${add}` : `${add}\n\n${out}`
     }
     if (next === out) continue
-    // Protected sections take added text only: nothing in them may be removed.
-    const removes = target.section !== undefined && PROTECTED_SECTIONS.has(target.section) && !next.includes(out)
-    if (removes || isProtectedLoss(out, next)) {
-      blocked.push(rule.id)
-      continue
-    }
     out = next
     changed.push(rule.id)
   }
-  return { text: out, changed, blocked }
+  return { text: out, changed }
 }
 
 // ---------------------------------------------------------------- state ---
@@ -238,7 +210,7 @@ type Book = {
   injected: Injected[]
 }
 type Note =
-  | { kind: 'hits'; changed: string[]; blocked: string[]; where: string; at: string }
+  | { kind: 'hits'; changed: string[]; where: string; at: string }
   | { kind: 'system'; before: Section[]; after: Section[] }
   | { kind: 'context'; blocks: ContextBlock[] }
   | { kind: 'injected'; row: Injected }
@@ -254,14 +226,12 @@ function emptyBook(): Book {
 
 function apply(into: Book, n: Note): void {
   if (n.kind === 'hits') {
-    const add = (id: string, kind: Hit['kind']) => {
-      const i = into.hits.findIndex(h => h.id === id && h.kind === kind)
-      const row: Hit = { id, kind, where: n.where, count: (i >= 0 ? into.hits[i]!.count : 0) + 1, last: n.at }
+    for (const id of n.changed) {
+      const i = into.hits.findIndex(h => h.id === id && h.kind === 'changed')
+      const row: Hit = { id, kind: 'changed', where: n.where, count: (i >= 0 ? into.hits[i]!.count : 0) + 1, last: n.at }
       if (i >= 0) into.hits[i] = row
       else into.hits.push(row)
     }
-    for (const id of n.changed) add(id, 'changed')
-    for (const id of n.blocked) add(id, 'blocked')
     dirty.add('hits')
   } else if (n.kind === 'system') {
     into.systemBefore = n.before
@@ -279,7 +249,7 @@ function apply(into: Book, n: Note): void {
 
 /** Queues a bookkeeping note. Synchronous: callers never wait on it. */
 function note($: EngineInterface, n: Note): void {
-  if (n.kind === 'hits' && !n.changed.length && !n.blocked.length) return
+  if (n.kind === 'hits' && !n.changed.length) return
   queue.push(n)
   void drain($)
 }
@@ -422,7 +392,6 @@ export const register: Register = on => {
     const { rules } = await load($)
     const v = await vars($)
     const changed: string[] = []
-    const blocked: string[] = []
     const drops = rules.filter(r => r.dropSection !== undefined && r.where.has('system'))
     for (const r of drops) if (composed.sections.some(s => s.id === r.dropSection)) changed.push(r.id)
     const dropped = new Set(drops.map(r => r.dropSection))
@@ -431,7 +400,6 @@ export const register: Register = on => {
       .map(s => {
         const r = applyRules(s.text, { where: 'system', section: s.id }, rules, v)
         changed.push(...r.changed)
-        blocked.push(...r.blocked)
         return r.text === s.text ? s : { ...s, text: r.text }
       })
     const added = rules
@@ -442,7 +410,7 @@ export const register: Register = on => {
       })
     const result = [...sections, ...added]
     note($, { kind: 'system', before: [...composed.sections], after: result })
-    note($, { kind: 'hits', changed, blocked, where: 'system', at: new Date().toISOString() })
+    note($, { kind: 'hits', changed, where: 'system', at: new Date().toISOString() })
     return { ...composed, sections: result }
   })
 
@@ -456,7 +424,7 @@ export const register: Register = on => {
     const described = await next(e)
     const { rules } = await load($)
     const r = applyRules(described.description, { where: 'tools', tool: e.tool }, rules, await vars($))
-    note($, { kind: 'hits', changed: r.changed, blocked: r.blocked, where: `tool ${e.tool}`, at: new Date().toISOString() })
+    note($, { kind: 'hits', changed: r.changed, where: `tool ${e.tool}`, at: new Date().toISOString() })
     return r.text === described.description ? described : { ...described, description: r.text }
   })
 
@@ -467,7 +435,7 @@ export const register: Register = on => {
     const r = applyRules(injected.text, { where: 'attachments', attachment: e.type }, rules, await vars($))
     const row: Injected = { type: e.type, origin: e.origin?.kind ?? '?', before: injected.text, after: r.text }
     note($, { kind: 'injected', row })
-    note($, { kind: 'hits', changed: r.changed, blocked: r.blocked, where: `attachment ${e.type}`, at: new Date().toISOString() })
+    note($, { kind: 'hits', changed: r.changed, where: `attachment ${e.type}`, at: new Date().toISOString() })
     return r.text === injected.text ? injected : { ...injected, text: r.text }
   })
 
@@ -482,7 +450,7 @@ export const register: Register = on => {
     for (const b of blocks) {
       if (b.tools && !b.tools.includes(e.tool)) continue
       if (!b.regex.test(text)) continue
-      note($, { kind: 'hits', changed: [b.id], blocked: [], where: `block ${e.tool}`, at: new Date().toISOString() })
+      note($, { kind: 'hits', changed: [b.id], where: `block ${e.tool}`, at: new Date().toISOString() })
       const message = fill(b.message ?? 'this call matches a block rule.', await vars($))
       return { deny: `alter-system-prompt (${b.id}): ${message}` }
     }

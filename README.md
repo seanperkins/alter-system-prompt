@@ -101,22 +101,12 @@ In rule text, `{projectRoot}` and `{home}` are filled in, and with `findRegex`, 
 
 Presets live in `hooks/presets.ts`. To suggest a new one, add it there with a test.
 
-## What it won't change
-
-Some text is protected, so a rule can't weaken safety or policy instructions by accident:
-
-- **Protected sections** (`action_caution`, `user_privacy`, `heron_brook`, `endconv_deferred_hint`) can be added to but not rewritten or dropped.
-- **Protected phrases**, such as the security-testing policy line and "Claude never publishes…" in the Artifact tool, can't be removed from any text. A rule that would remove one is skipped for that text, and `/alter-prompt` reports it as blocked.
-- **File contents** shown to the model, such as a file it read or edited, are never rewritten, so the model always sees what's really on disk.
-
-This guards against accidents. It isn't a security boundary.
-
 ## Terms of service
 
 The mod only changes text in your own Claude Code sessions, using Claude Code's own mod hooks. It doesn't modify the Claude Code program, take anything apart, or get around a usage limit.
 
 - **Changing the system prompt is supported.** Claude Code has official flags for it: `--system-prompt` replaces the whole prompt and `--append-system-prompt` adds to it ([CLI reference](https://code.claude.com/docs/en/cli-reference)). Output styles and `CLAUDE.md` change it too.
-- **Don't use it to remove safeguards.** Anthropic's [Usage Policy](https://www.anthropic.com/legal/aup) forbids bypassing "capabilities, restrictions, or guardrails established within our products". The protections above make that hard to do by accident. Don't write rules that try anyway.
+- **Don't use it to remove safeguards.** Anthropic's [Usage Policy](https://www.anthropic.com/legal/aup) forbids bypassing "capabilities, restrictions, or guardrails established within our products". The mod applies whatever rules you write, so this one is on you.
 - **The Claude Code program itself is unchanged.** The [legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance) requires Claude Code to run "as published by Anthropic" when a business offers it to others. If you ship this inside a product for other people, check with Anthropic first.
 - **One gap:** the hook events this mod uses (`prompt.compose`, `tool.describe`, `prompt.attachment`) come with Claude Code's mod API and its type definitions. They aren't covered in the public hooks documentation yet.
 
@@ -126,6 +116,7 @@ This isn't legal advice. Anthropic's [Consumer Terms](https://www.anthropic.com/
 
 - **Rules match Claude Code's wording.** If an update rewords a sentence, the rule stops matching and the original goes through unchanged. `/alter-prompt` shows rules that haven't matched, which is the sign to check `/prompt-dump`.
 - **When changes take effect.** System prompt and injected-message rules apply from your next message. Claude Code holds on to tool descriptions and context blocks, so changes there apply in a new session or after `/clear`.
+- **File contents are left alone.** Text that carries a file the model read or edited is never rewritten, so the model always sees what's really on disk.
 - **Blocks only see what the call names.** A block matches the command or path in the call. A program that writes somewhere on its own isn't caught.
 
 ## How it's built

@@ -1,8 +1,8 @@
 export type Section = { id: string; text: string; scope: string }
 export type ContextBlock = { name: string; text: string }
 export type Injected = { type: string; origin: string; before: string; after: string }
-/** How often a rule changed (or was blocked from changing) text this session. */
-export type Hit = { id: string; kind: 'changed' | 'blocked'; where: string; count: number; last: string }
+/** How often a rule changed text this session. */
+export type Hit = { id: string; kind: 'changed'; where: string; count: number; last: string }
 
 declare module 'claude-code' {
   interface PluginState {

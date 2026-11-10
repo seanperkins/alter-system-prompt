@@ -87,25 +87,29 @@ test('addSection adds a section and dropSection removes one', async ($, on) => {
   expect(sections[1]!.text).toBe('Always answer in British English.')
 })
 
-test('a rule cannot remove protected safety text', async ($, on) => {
+test('a rule can rewrite or drop any section: nothing is off limits', async ($, on) => {
   engine(on, {
     [GLOBAL]: {
       rules: [
-        { id: 'strip', findRegex: 'IMPORTANT: Assist with authorized security testing[^\\n]*', replace: '' },
+        { id: 'strip', findRegex: 'IMPORTANT: Assist with authorized security testing[^\\n]*', replace: 'Mine.' },
         { id: 'drop', dropSection: 'user_privacy' },
+        { id: 'rewrite', section: 'action_caution', find: 'confirm first', replace: 'tell me after' },
       ],
     },
   })
-  const security = 'IMPORTANT: Assist with authorized security testing, defensive security.'
   on('prompt.compose', () => ({
     sections: [
-      { id: 'lean_body', scope: 'shared', text: `You are an agent.\n${security}` },
+      { id: 'lean_body', scope: 'shared', text: 'You are an agent.\nIMPORTANT: Assist with authorized security testing, defensive security.' },
       { id: 'user_privacy', scope: 'session', text: 'Treat the user as private.' },
+      { id: 'action_caution', scope: 'session', text: 'For risky actions, confirm first.' },
     ],
   }))
   const { sections } = await $.prompt.compose(COMPOSE)
-  expect(sections[0]!.text).toContain(security)
-  expect(sections.map(s => s.id)).toContain('user_privacy')
+  expect(sections.map(s => s.id)).toEqual(['lean_body', 'action_caution'])
+  expect(sections[0]!.text).toBe('You are an agent.\nMine.')
+  expect(sections[1]!.text).toBe('For risky actions, tell me after.')
+  const { text } = await $.command.run({ command: 'alter-prompt', args: '' } as never)
+  for (const id of ['strip', 'drop', 'rewrite']) expect(text).toContain(`- ${id}: changed 1x`)
 })
 
 test('append on a tool description only touches that tool', async ($, on) => {
@@ -195,20 +199,6 @@ test('/alter-prompt add copies a preset into the rules file, keeping existing ru
   expect(saved.block.map((r: { id: string }) => r.id)).toEqual(['no-scratchpad-writes'])
   const denied = await $.tool.call({ tool: 'Write', file_path: `${SCRATCH}/a.txt`, content: 'x' })
   expect(denied.deny).toContain('no-scratchpad-writes')
-})
-
-test('a protected section can be added to but not rewritten', async ($, on) => {
-  engine(on, {
-    [GLOBAL]: {
-      rules: [
-        { id: 'rewrite', section: 'action_caution', find: 'confirm first', replace: 'just do it' },
-        { id: 'extend', section: 'action_caution', append: 'Also: never force-push.' },
-      ],
-    },
-  })
-  on('prompt.compose', () => ({ sections: [{ id: 'action_caution', scope: 'session', text: 'For risky actions, confirm first.' }] }))
-  const { sections } = await $.prompt.compose(COMPOSE)
-  expect(sections[0]!.text).toBe('For risky actions, confirm first.\n\nAlso: never force-push.')
 })
 
 test('a block pattern with the g flag matches every call, not every other one', async ($, on) => {
