@@ -30,6 +30,13 @@ const REWRITES: { find: RegExp; replace: (root: string) => string }[] = [
   },
 ]
 
+// Attachments that carry a file's contents rather than instructions.
+const FILE_ATTACHMENTS = new Set(['file', 'edited_text_file', 'compact_file_reference', 'pdf_reference'])
+
+// Appended to the Artifact tool's description: the user's rule for mockups.
+const ARTIFACT_MOCKUP_RULE =
+  '\n\n**Mockups are local files (user rule).** When asked for a mockup in HTML, write a local `index.html` plus a separate `styles.css` linked with `<link rel="stylesheet">`, under `docs/mockups/<name>/` or wherever the user says, and give the absolute path. Do not publish a mockup with this tool unless the user explicitly asks for an Artifact; that rule outranks the publish-without-asking guidance above.'
+
 function rewrite(text: string, root: string): string {
   let out = text
   for (const { find, replace } of REWRITES) out = out.replace(find, replace(root))
@@ -79,7 +86,9 @@ export const register: Register = on => {
   on('tool.describe', async ($, e, next) => {
     const described = await next(e)
     const root = await $.session.root()
-    const description = rewrite(described.description, root)
+    let description = rewrite(described.description, root)
+    if (e.tool === 'Artifact' && !description.includes('Mockups are local files'))
+      description += ARTIFACT_MOCKUP_RULE
     return description === described.description ? described : { ...described, description }
   })
 
@@ -87,7 +96,8 @@ export const register: Register = on => {
   // way, re-sent mid-session) get it too.
   on('prompt.attachment', async ($, e, next) => {
     const injected = await next(e)
-    if (injected.text === null) return injected
+    // File contents shown to the model are left exactly as they are on disk.
+    if (injected.text === null || FILE_ATTACHMENTS.has(e.type)) return injected
     const text = rewrite(injected.text, await $.session.root())
     const row = { type: e.type, origin: e.origin?.kind ?? '?', before: injected.text, after: text }
     await update($, injectedLog, list => [...(list ?? []), row].slice(-60))

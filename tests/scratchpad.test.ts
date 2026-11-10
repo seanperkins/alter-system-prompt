@@ -67,3 +67,20 @@ test('the sandbox $TMPDIR instruction is rewritten', async ($, on) => {
   const { text } = await $.prompt.attachment({ type: 'sandbox', text: '', origin: { kind: 'engine' } } as never)
   expect(text).toContain(`${ROOT}/.tmp/<unique-task-dir>/`)
 })
+
+test('file contents shown to the model are not rewritten', async ($, on) => {
+  engine(on)
+  const original = 'For temporary files, always use the `$TMPDIR` environment variable.'
+  on('prompt.attachment', () => ({ text: original }))
+  const { text } = await $.prompt.attachment({ type: 'edited_text_file', text: '', origin: { kind: 'engine' } } as never)
+  expect(text).toBe(original)
+})
+
+test('the Artifact tool description gains the mockup rule, other tools do not', async ($, on) => {
+  engine(on)
+  on('tool.describe', (_, e) => ({ description: `${e.tool} does things.` }))
+  const artifact = await $.tool.describe({ tool: 'Artifact', description: '' } as never)
+  expect(artifact.description).toContain('Mockups are local files')
+  const bash = await $.tool.describe({ tool: 'Bash', description: '' } as never)
+  expect(bash.description).toBe('Bash does things.')
+})
