@@ -53,7 +53,7 @@ type RawBlock = {
 
 type Rule = RawRule & { where: Set<Where>; regex: RegExp | null; source: string }
 type Block = RawBlock & { regex: RegExp; source: string }
-type Loaded = { rules: Rule[]; blocks: Block[]; files: string[]; errors: string[] }
+type Loaded = { rules: Rule[]; blocks: Block[]; files: string[]; errors: string[]; failed?: boolean }
 type Vars = { projectRoot: string; home: string }
 type Target = { where: Where; section?: string; tool?: string; attachment?: string }
 
@@ -219,15 +219,128 @@ const injectedLog = atom({ plugin: 'alter-system-prompt', key: 'injected' } as c
 })
 const hits = atom({ plugin: 'alter-system-prompt', key: 'hits' } as const, [] as Hit[], { shape: 'hits-1' })
 
-// Bookkeeping (captures for /prompt-dump, match counts) is best effort: when
-// several messages arrive at once their writes can collide, and that must
-// never stop a rewrite from going out.
-async function quietly(work: Promise<unknown>): Promise<void> {
-  try {
-    await work
-  } catch {
-    // dropped: a lost count or capture is harmless
+// Bookkeeping: the captures /prompt-dump writes and the match counts
+// /alter-prompt shows. It is kept apart from the rewrites on purpose:
+//
+// - A hook never waits on it. It drops a note in a queue (note) and returns
+//   its rewritten text; nothing that happens in bookkeeping can delay, skip
+//   or change a rewrite.
+// - One writer. drain() is the only code that touches session state, one
+//   batch at a time, so the mod's own writes can never collide.
+// - The truth is in memory (book). Each write stores a whole value, not a
+//   patch of what was read. The first drain after a reload reads the stored
+//   values back once, so counts and captures survive a reload.
+type Book = {
+  hits: Hit[]
+  systemBefore: Section[]
+  systemAfter: Section[]
+  context: ContextBlock[]
+  injected: Injected[]
+}
+type Note =
+  | { kind: 'hits'; changed: string[]; blocked: string[]; where: string; at: string }
+  | { kind: 'system'; before: Section[]; after: Section[] }
+  | { kind: 'context'; blocks: ContextBlock[] }
+  | { kind: 'injected'; row: Injected }
+
+let book: Book | null = null
+const queue: Note[] = []
+const dirty = new Set<keyof Book>()
+let draining: Promise<void> | null = null
+
+function emptyBook(): Book {
+  return { hits: [], systemBefore: [], systemAfter: [], context: [], injected: [] }
+}
+
+function apply(into: Book, n: Note): void {
+  if (n.kind === 'hits') {
+    const add = (id: string, kind: Hit['kind']) => {
+      const i = into.hits.findIndex(h => h.id === id && h.kind === kind)
+      const row: Hit = { id, kind, where: n.where, count: (i >= 0 ? into.hits[i]!.count : 0) + 1, last: n.at }
+      if (i >= 0) into.hits[i] = row
+      else into.hits.push(row)
+    }
+    for (const id of n.changed) add(id, 'changed')
+    for (const id of n.blocked) add(id, 'blocked')
+    dirty.add('hits')
+  } else if (n.kind === 'system') {
+    into.systemBefore = n.before
+    into.systemAfter = n.after
+    dirty.add('systemBefore')
+    dirty.add('systemAfter')
+  } else if (n.kind === 'context') {
+    into.context = n.blocks
+    dirty.add('context')
+  } else {
+    into.injected = [...into.injected, n.row].slice(-60)
+    dirty.add('injected')
   }
+}
+
+/** Queues a bookkeeping note. Synchronous: callers never wait on it. */
+function note($: EngineInterface, n: Note): void {
+  if (n.kind === 'hits' && !n.changed.length && !n.blocked.length) return
+  queue.push(n)
+  void drain($)
+}
+
+async function hydrate($: EngineInterface): Promise<Book> {
+  const stored = emptyBook()
+  try {
+    stored.hits = [...((await read($, hits)) ?? [])]
+    stored.systemBefore = [...((await read($, systemBefore)) ?? [])]
+    stored.systemAfter = [...((await read($, systemAfter)) ?? [])]
+    stored.context = [...((await read($, context)) ?? [])]
+    stored.injected = [...((await read($, injectedLog)) ?? [])]
+  } catch {
+    // nothing stored, or unreadable: start empty
+  }
+  return stored
+}
+
+async function persist($: EngineInterface, from: Book, key: keyof Book): Promise<void> {
+  if (key === 'hits') await update($, hits, () => from.hits)
+  else if (key === 'systemBefore') await update($, systemBefore, () => from.systemBefore)
+  else if (key === 'systemAfter') await update($, systemAfter, () => from.systemAfter)
+  else if (key === 'context') await update($, context, () => from.context)
+  else await update($, injectedLog, () => from.injected)
+}
+
+/**
+ * The single writer. Resolves once every note queued so far is in the book
+ * and an attempt was made to store it. Never rejects: a store that fails
+ * loses that copy, and the book in memory still has it.
+ */
+function drain($: EngineInterface): Promise<void> {
+  if (draining) return draining
+  draining = (async () => {
+    try {
+      if (!book) book = await hydrate($)
+      while (queue.length) {
+        for (const n of queue.splice(0)) apply(book, n)
+        for (const key of [...dirty]) {
+          dirty.delete(key)
+          try {
+            await persist($, book, key)
+          } catch {
+            // dropped: the in-memory book still has it
+          }
+        }
+      }
+    } catch {
+      // the book is in memory; nothing here may reach a hook
+    } finally {
+      draining = null
+      if (queue.length) void drain($)
+    }
+  })()
+  return draining
+}
+
+/** The book as it stands once queued notes are in, for the commands. */
+async function settled($: EngineInterface): Promise<Book> {
+  await drain($)
+  return book ?? emptyBook()
 }
 
 const STARTER = '{\n  "rules": [],\n  "block": []\n}\n'
@@ -246,50 +359,46 @@ function ruleFiles(v: Vars): string[] {
   return [`${v.home}/.claude/alter-system-prompt.json`, `${v.projectRoot}/.claude/alter-system-prompt.json`]
 }
 
+// Never rejects: a rewrite hook relies on it. A failed read is reported and
+// not cached, so the next call tries again.
 async function load($: EngineInterface): Promise<Loaded> {
-  const v = await vars($)
+  let v: Vars
+  try {
+    v = await vars($)
+  } catch {
+    return { rules: [], blocks: [], files: [], errors: ['could not read the session root or HOME'] }
+  }
   if (cache?.key === v.projectRoot) return cache.loaded
   const loaded = (async (): Promise<Loaded> => {
     const errors: string[] = []
     const found: string[] = []
     let rules: Rule[] = []
     let blocks: Block[] = []
+    let failed = false
     for (const path of ruleFiles(v)) {
-      if (!(await $.fs.exists(path))) continue
-      found.push(path)
       try {
+        if (!(await $.fs.exists(path))) continue
+        found.push(path)
         const compiled = compile(JSON.parse(await $.fs.read(path)) as RuleFile, path, errors)
         rules = rules.concat(compiled.rules)
         blocks = blocks.concat(compiled.blocks)
       } catch (error) {
-        errors.push(`${path}: not valid JSON (${String(error)})`)
+        errors.push(`${path}: could not be read as JSON (${String(error)})`)
+        failed = true
       }
     }
     if (errors.length)
       $.ui.toast(
         `alter-system-prompt: ${errors[0]}${errors.length > 1 ? ` (+${errors.length - 1} more: /alter-prompt)` : ''}`,
       )
-    return { rules: byId(rules), blocks: byId(blocks), files: found, errors }
+    return { rules: byId(rules), blocks: byId(blocks), files: found, errors, failed }
   })()
   cache = { key: v.projectRoot, loaded }
+  // A read that failed is not kept: the next call reads the files again.
+  void loaded.then(result => {
+    if (result.failed && cache?.loaded === loaded) cache = null
+  })
   return loaded
-}
-
-async function record($: EngineInterface, changed: string[], blocked: string[], where: string) {
-  if (!changed.length && !blocked.length) return
-  const at = new Date().toISOString()
-  await quietly(update($, hits, list => {
-    const next = [...(list ?? [])]
-    const add = (id: string, kind: Hit['kind']) => {
-      const i = next.findIndex(h => h.id === id && h.kind === kind)
-      const row: Hit = { id, kind, where, count: (i >= 0 ? next[i]!.count : 0) + 1, last: at }
-      if (i >= 0) next[i] = row
-      else next.push(row)
-    }
-    for (const id of changed) add(id, 'changed')
-    for (const id of blocked) add(id, 'blocked')
-    return next
-  }))
 }
 
 export const register: Register = on => {
@@ -332,15 +441,14 @@ export const register: Register = on => {
         return { id: `alter-system-prompt:${r.id}`, text: fill(r.addSection!, v), scope: 'session' as const }
       })
     const result = [...sections, ...added]
-    await quietly(update($, systemBefore, () => [...composed.sections]))
-    await quietly(update($, systemAfter, () => result))
-    await record($, changed, blocked, 'system')
+    note($, { kind: 'system', before: [...composed.sections], after: result })
+    note($, { kind: 'hits', changed, blocked, where: 'system', at: new Date().toISOString() })
     return { ...composed, sections: result }
   })
 
   on('prompt.context', async ($, e, next) => {
     const result = await next(e)
-    await quietly(update($, context, () => [...result.blocks]))
+    note($, { kind: 'context', blocks: [...result.blocks] })
     return result
   })
 
@@ -348,7 +456,7 @@ export const register: Register = on => {
     const described = await next(e)
     const { rules } = await load($)
     const r = applyRules(described.description, { where: 'tools', tool: e.tool }, rules, await vars($))
-    await record($, r.changed, r.blocked, `tool ${e.tool}`)
+    note($, { kind: 'hits', changed: r.changed, blocked: r.blocked, where: `tool ${e.tool}`, at: new Date().toISOString() })
     return r.text === described.description ? described : { ...described, description: r.text }
   })
 
@@ -358,8 +466,8 @@ export const register: Register = on => {
     const { rules } = await load($)
     const r = applyRules(injected.text, { where: 'attachments', attachment: e.type }, rules, await vars($))
     const row: Injected = { type: e.type, origin: e.origin?.kind ?? '?', before: injected.text, after: r.text }
-    await quietly(update($, injectedLog, list => [...(list ?? []), row].slice(-60)))
-    await record($, r.changed, r.blocked, `attachment ${e.type}`)
+    note($, { kind: 'injected', row })
+    note($, { kind: 'hits', changed: r.changed, blocked: r.blocked, where: `attachment ${e.type}`, at: new Date().toISOString() })
     return r.text === injected.text ? injected : { ...injected, text: r.text }
   })
 
@@ -374,7 +482,7 @@ export const register: Register = on => {
     for (const b of blocks) {
       if (b.tools && !b.tools.includes(e.tool)) continue
       if (!b.regex.test(text)) continue
-      await record($, [b.id], [], `block ${e.tool}`)
+      note($, { kind: 'hits', changed: [b.id], blocked: [], where: `block ${e.tool}`, at: new Date().toISOString() })
       const message = fill(b.message ?? 'this call matches a block rule.', await vars($))
       return { deny: `alter-system-prompt (${b.id}): ${message}` }
     }
@@ -435,7 +543,7 @@ export const register: Register = on => {
       }
     }
     const loaded = await load($)
-    const seen = (await read($, hits)) ?? []
+    const seen = (await settled($)).hits
     const status = (id: string) => {
       const rows = seen.filter(h => h.id === id)
       if (!rows.length) return 'not matched yet this session'
@@ -457,14 +565,15 @@ export const register: Register = on => {
 
   on('command.run', { command: 'prompt-dump' }, async $ => {
     const root = await $.session.root()
-    const lastOriginal = (await read($, systemBefore)) ?? []
+    const current = await settled($)
+    const lastOriginal = current.systemBefore
     if (!lastOriginal.length)
       return {
         text: 'Nothing captured yet. Send any message first so Claude Code builds a prompt, then run /prompt-dump again.',
       }
-    const lastRewritten = (await read($, systemAfter)) ?? []
-    const contextBlocks = (await read($, context)) ?? []
-    const attachments = (await read($, injectedLog)) ?? []
+    const lastRewritten = current.systemAfter
+    const contextBlocks = current.context
+    const attachments = current.injected
     const stamp = new Date().toISOString().replace(/[:.]/g, '-')
     const dir = `${root}/.tmp/prompt-dump-${stamp}`
     const render = (sections: readonly Section[]) =>

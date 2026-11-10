@@ -22,11 +22,12 @@ type Files = Record<string, unknown>
 
 // Nothing sits beneath the plugin: each hook here stands for the engine,
 // with the rule files given as an in-memory file system.
-function engine(on: On, files: Files) {
+function engine(on: On, files: Files, readFile?: (path: string) => string) {
   on('session.root', () => ({ value: ROOT }))
   on('env.get', (_, e) => ({ value: e.name === 'HOME' ? HOME : undefined }))
   on('fs.exists', (_, e) => ({ value: e.path in files }))
   on('fs.read', (_, e) => {
+    if (readFile) return { value: readFile(e.path) }
     const content = files[e.path]
     return { value: typeof content === 'string' ? content : JSON.stringify(content) }
   })
@@ -226,4 +227,64 @@ test('a rewrite still goes out when its bookkeeping write fails', async ($, on) 
   on('prompt.attachment', () => ({ text: 'use the scratchpad' }))
   const { text } = await $.prompt.attachment({ type: 'environment', text: '', origin: { kind: 'engine' } } as never)
   expect(text).toBe('use the project .tmp')
+})
+
+// The class of bug these guard against: bookkeeping (state writes) reaching
+// the rewrite path. Rewrites must come out right however many hooks run at
+// once and whatever the state store does.
+
+test('50 injected messages at once are all rewritten, while every state write collides', async ($, on) => {
+  engine(on, { [GLOBAL]: { rules: [{ id: 'r1', find: 'scratchpad', replace: 'project .tmp' }] } })
+  // What a collision looks like: someone else wrote first, so this write is
+  // refused. The state library retries, then gives up by throwing.
+  let version = 0
+  on('state.set', () => ({ value: { isSet: false as const, version: ++version } }))
+  on('prompt.attachment', (_, e) => ({ text: `message ${(e as { type: string }).type}: use the scratchpad` }))
+  const results = await Promise.all(
+    Array.from({ length: 50 }, (_, i) =>
+      $.prompt.attachment({ type: `m${i}`, text: '', origin: { kind: 'engine' } } as never),
+    ),
+  )
+  results.forEach((r, i) => expect(r.text).toBe(`message m${i}: use the project .tmp`))
+  const { text } = await $.command.run({ command: 'alter-prompt', args: '' } as never)
+  expect(text).toContain('- r1: changed 50x')
+})
+
+test('a rewrite does not wait on the state store, even one that never answers', async ($, on) => {
+  engine(on, { [GLOBAL]: { rules: [{ id: 'r1', find: 'scratchpad', replace: 'project .tmp' }] } })
+  on('state.get', () => new Promise(() => {}))
+  on('state.set', () => new Promise(() => {}))
+  on('prompt.attachment', () => ({ text: 'use the scratchpad' }))
+  on('prompt.compose', () => ({ sections: [{ id: 's', scope: 'session', text: 'the scratchpad' }] }))
+  const [attachment, composed] = await Promise.all([
+    $.prompt.attachment({ type: 'environment', text: '', origin: { kind: 'engine' } } as never),
+    $.prompt.compose(COMPOSE),
+  ])
+  expect(attachment.text).toBe('use the project .tmp')
+  expect(composed.sections[0]!.text).toBe('the project .tmp')
+})
+
+test('20 blocked tool calls at once are all refused', async ($, on) => {
+  engine(on, { [GLOBAL]: { block: [{ id: 'no-rm', tools: ['Bash'], pattern: 'rm -rf' }] } })
+  let version = 0
+  on('state.set', () => ({ value: { isSet: false as const, version: ++version } }))
+  const results = await Promise.all(
+    Array.from({ length: 20 }, () => $.tool.call({ tool: 'Bash', command: 'rm -rf build' })),
+  )
+  for (const r of results) expect(r.deny).toContain('no-rm')
+})
+
+test('a rule file that cannot be read is retried on the next message, not cached as empty', async ($, on) => {
+  let reads = 0
+  const files: Files = { [GLOBAL]: { rules: [{ id: 'r1', find: 'a', replace: 'b' }] } }
+  engine(on, files, path => {
+    reads++
+    if (reads === 1) throw new Error('EBUSY')
+    return JSON.stringify(files[path])
+  })
+  on('prompt.compose', () => ({ sections: [{ id: 's', scope: 'session', text: 'a' }] }))
+  const first = await $.prompt.compose(COMPOSE)
+  expect(first.sections[0]!.text).toBe('a')
+  const second = await $.prompt.compose(COMPOSE)
+  expect(second.sections[0]!.text).toBe('b')
 })

@@ -128,6 +128,10 @@ This isn't legal advice. Anthropic's [Consumer Terms](https://www.anthropic.com/
 - **When changes take effect.** System prompt and injected-message rules apply from your next message. Claude Code holds on to tool descriptions and context blocks, so changes there apply in a new session or after `/clear`.
 - **Blocks only see what the call names.** A block matches the command or path in the call. A program that writes somewhere on its own isn't caught.
 
+## How it's built
+
+Rewrites never depend on anything but your rules. The hooks that change text read the rules (cached), compute the new text with a pure function, and return it. Everything else, the match counts behind `/alter-prompt` and the captures behind `/prompt-dump`, goes into a queue that a single background writer stores. A hook never waits on that writer, so a slow, failing or busy state store can't delay, skip or change a rewrite. The tests check this directly: 50 messages at once while every state write fails, and a state store that never answers.
+
 ## Development
 
 ```

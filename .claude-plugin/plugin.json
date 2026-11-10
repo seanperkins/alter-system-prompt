@@ -1,6 +1,6 @@
 {
   "name": "alter-system-prompt",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Mod: rewrite Claude Code's built-in instructions with your own find/replace rules in a JSON file, block tool calls by pattern, and /prompt-dump what the model is sent. Safety text is protected.",
   "author": {
     "name": "Sean Perkins",
