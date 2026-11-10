@@ -31,10 +31,23 @@ A mod can. Claude Code's mod API lets a plugin see the system prompt as it's bui
 
    Use it to check the rewrite worked, and to find the next built-in instruction worth changing.
 
+4. **Adds a mockup rule to the Artifact tool.** The Artifact tool's built-in text says to publish finished work as a web page without being asked. The mod appends one rule to it: an HTML mockup is written as local files (`index.html` plus `styles.css`) and its path given, and only published when you ask. Nothing in the tool's text is removed.
+
+## Terms of service
+
+This mod only changes text for your own Claude Code sessions, using Claude Code's own mod hooks. It doesn't modify the Claude Code program, take anything apart, or route around a limit. What the mod changes is limited on purpose:
+
+- **Changing the system prompt is a supported thing to do.** Claude Code has official flags for it. `--system-prompt` replaces the whole prompt, and `--append-system-prompt` adds to it ([CLI reference](https://code.claude.com/docs/en/cli-reference)). Output styles and `CLAUDE.md` change it too.
+- **It never touches safety, security or policy text.** The rewrites match exactly two sentences about temporary files, and the Artifact change only adds a sentence. Anthropic's [Usage Policy](https://www.anthropic.com/legal/aup) forbids bypassing "capabilities, restrictions, or guardrails established within our products", so don't add a rewrite that removes or weakens one.
+- **It doesn't modify the Claude Code program.** It's a plugin loaded through Claude Code's mod support. The [legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance) requires the program to run "as published by Anthropic" when a business offers Claude Code to others. That rule covers the program, not prompt changes, but if you ship this inside a product for other people, check with Anthropic first.
+- **One gap:** the hook events this mod uses (`prompt.compose`, `tool.describe`, `prompt.attachment`) come with Claude Code's mod API and its type definitions. They aren't covered in the public hooks documentation yet.
+
+This isn't legal advice. Anthropic's [Consumer Terms](https://www.anthropic.com/legal/consumer-terms) and [Commercial Terms](https://www.anthropic.com/legal/commercial-terms) are the source to check.
+
 ## Install
 
 ```
-/plugin marketplace add MobilityLabs/alter-system-prompt
+/plugin marketplace add seanperkins/alter-system-prompt
 /plugin install alter-system-prompt@alter-system-prompt
 ```
 
