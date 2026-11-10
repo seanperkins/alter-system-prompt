@@ -558,7 +558,7 @@ export const register: Register = on => {
     if (loaded.errors.length) lines.push('', 'Errors:', ...loaded.errors.map(x => `- ${x}`))
     lines.push(
       '',
-      'A rule that never matches usually means Claude Code reworded that text: run /prompt-dump and look in system-before.md and attachments.md.',
+      'A rule that never matches usually means Claude Code reworded that text: run /prompt-dump and look in system-before.md and attachments-before.md.',
     )
     return { text: lines.join('\n') }
   })
@@ -584,23 +584,27 @@ export const register: Register = on => {
       `${dir}/context.md`,
       contextBlocks.map(b => `<!-- block: ${b.name} | ${b.text.length} chars -->\n\n${b.text}`).join('\n\n'),
     )
-    await $.fs.write(
-      `${dir}/attachments.md`,
+    // Both sides of every injected message, in the same order, so a diff of
+    // the two files shows exactly what the rules changed.
+    const renderInjected = (side: 'before' | 'after') =>
       attachments
         .map(
           a =>
-            `<!-- attachment: ${a.type} | origin ${a.origin} | ${a.before.length} chars${a.after === a.before ? '' : ' | REWRITTEN'} -->\n\n${a.after}`,
+            `<!-- attachment: ${a.type} | origin ${a.origin} | ${a[side].length} chars${a.after === a.before ? '' : ' | REWRITTEN'} -->\n\n${a[side]}`,
         )
-        .join('\n\n'),
-    )
+        .join('\n\n')
+    await $.fs.write(`${dir}/attachments-before.md`, renderInjected('before'))
+    await $.fs.write(`${dir}/attachments-after.md`, renderInjected('after'))
     const rows = [
       ...lastRewritten.map(s => `system\t${s.id}\t${s.text.length}`),
       ...contextBlocks.map(b => `context\t${b.name}\t${b.text.length}`),
       ...attachments.map(a => `attachment\t${a.type}\t${a.after.length}`),
     ]
     await $.fs.write(`${dir}/sections.tsv`, ['where\tid\tchars', ...rows].join('\n'))
+    const rewritten = [...new Set(attachments.filter(a => a.after !== a.before).map(a => a.type))]
+    const summary = `${attachments.filter(a => a.after !== a.before).length} of ${attachments.length} injected messages rewritten${rewritten.length ? ` (${rewritten.join(', ')})` : ''}`
     return {
-      text: `Prompt saved to ${dir}/ (system-before.md, system-after.md, context.md, attachments.md, sections.tsv)`,
+      text: `Prompt saved to ${dir}/ (system-before.md, system-after.md, context.md, attachments-before.md, attachments-after.md, sections.tsv). ${summary}. Compare the before and after files to see what your rules changed.`,
     }
   })
 }

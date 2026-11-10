@@ -288,3 +288,40 @@ test('a rule file that cannot be read is retried on the next message, not cached
   const second = await $.prompt.compose(COMPOSE)
   expect(second.sections[0]!.text).toBe('b')
 })
+
+test('/prompt-dump saves injected messages before and after the rules, and names the rewritten ones', async ($, on) => {
+  const files: Files = { [GLOBAL]: await readPreset('project-tmp.json') }
+  engine(on, files)
+  on('fs.write', (_, e) => {
+    files[e.path] = e.text
+    return { value: undefined }
+  })
+  on('prompt.compose', () => ({ sections: [{ id: 's', scope: 'session', text: 'hello' }] }))
+  on('prompt.attachment', (_, e) => ({
+    text:
+      (e as { type: string }).type === 'environment'
+        ? `# Environment\n - Scratchpad directory: ${SCRATCH} — always use it for temporary files.`
+        : 'Today is Tuesday.',
+  }))
+  await $.prompt.compose(COMPOSE)
+  await $.prompt.attachment({ type: 'environment', text: '', origin: { kind: 'engine' } } as never)
+  await $.prompt.attachment({ type: 'date', text: '', origin: { kind: 'engine' } } as never)
+  const { text } = await $.command.run({ command: 'prompt-dump', args: '' } as never)
+  const saved = (name: string) => {
+    const path = Object.keys(files).find(p => p.startsWith(`${ROOT}/.tmp/prompt-dump-`) && p.endsWith(`/${name}`))
+    return path ? (files[path] as string) : undefined
+  }
+  const before = saved('attachments-before.md')!
+  const after = saved('attachments-after.md')!
+  expect(before).toContain('Scratchpad directory:')
+  expect(before).not.toContain('Temporary files: put scripts')
+  expect(after).toContain('Temporary files: put scripts')
+  expect(after).not.toContain('Scratchpad directory:')
+  for (const dump of [before, after]) {
+    expect(dump.split('\n')[0]).toMatch(/^<!-- attachment: environment \| origin engine \| \d+ chars \| REWRITTEN -->$/)
+    expect(dump).toContain('<!-- attachment: date | origin engine | 17 chars -->')
+    expect(dump).toContain('Today is Tuesday.')
+  }
+  expect(saved('attachments.md')).toBe(undefined)
+  expect(text).toContain('1 of 2 injected messages rewritten (environment)')
+})

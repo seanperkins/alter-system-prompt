@@ -31,7 +31,7 @@ To write your own rule, run `/prompt-dump`, find the sentence you want to change
 | `/alter-prompt add <preset>` | Copies a preset into your rules file, keeping your other rules |
 | `/alter-prompt init` | Creates an empty rules file |
 | `/alter-prompt reload` | Re-reads the rule files after you edit them |
-| `/prompt-dump` | Saves what the model was last sent to `<project>/.tmp/prompt-dump-<time>/`: the system prompt before and after your rules, the context blocks, and injected messages (rewritten ones are marked) |
+| `/prompt-dump` | Saves what the model was last sent to `<project>/.tmp/prompt-dump-<time>/`: the system prompt and the injected messages, each before and after your rules (`system-before.md` / `system-after.md`, `attachments-before.md` / `attachments-after.md`, rewritten messages marked `REWRITTEN`), and the context blocks. Most built-in instructions, including the scratchpad one, arrive as injected messages, so look in the `attachments` files first |
 
 ## Rule files
 
